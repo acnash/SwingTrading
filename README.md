@@ -33,7 +33,11 @@ Outputs are written to `output/`:
 - `all_signals.csv`
 - `buy_signals.csv`
 - `sell_signals.csv`
+- `failed_symbols.csv`
 - `buy_signal_review_prompt.txt`
+
+`failed_symbols.csv` records unavailable symbols and insufficient histories so a
+partial market-data response cannot pass silently.
 
 Upload `buy_signal_review_prompt.txt` to ChatGPT or Codex and ask it to perform the research exactly as instructed.
 
@@ -50,6 +54,35 @@ For example, 10-day / 30-day:
 ```bash
 python stock_signal_screener.py --short 10 --medium 30
 ```
+
+## Responsible market-data access
+
+Daily histories come from Yahoo Finance through the unofficial `yfinance`
+package. The defaults deliberately trade speed for reliability and lower
+request pressure:
+
+- 25 symbols per batch
+- no more than four `yfinance` worker threads
+- a random two-to-four-second pause between live batches
+- exponential backoff and three retries for failed symbols only
+- a persistent `.cache/market_data` cache with a 12-hour freshness window
+
+An ordinary second run within 12 hours uses the local cache. Force a new fetch
+only when required:
+
+```bash
+python stock_signal_screener.py --refresh-cache
+```
+
+The controls are configurable, for example:
+
+```bash
+python stock_signal_screener.py --batch-size 20 --threads 2 \
+  --min-pause 3 --max-pause 6 --max-retries 4
+```
+
+Avoid scheduling overlapping runs, because separate processes do not share a
+rate limiter.
 
 ## Add your own shares
 

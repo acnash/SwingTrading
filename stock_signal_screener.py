@@ -17,6 +17,8 @@ Default windows:
 Outputs:
   output/all_signals.csv
   output/buy_signals.csv
+  output/sell_signals.csv
+  output/failed_symbols.csv
   output/buy_signal_review_prompt.txt
 
 This is a research/screening tool, not investment advice.
@@ -26,6 +28,9 @@ from __future__ import annotations
 
 import argparse
 import math
+import random
+import re
+import time
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -210,28 +215,139 @@ def chunks(seq: list[str], size: int) -> Iterable[list[str]]:
         yield seq[i:i + size]
 
 
+def ticker_cache_path(cache_dir: Path, ticker: str, period: str) -> Path:
+    safe_ticker = re.sub(r"[^A-Za-z0-9._-]+", "_", ticker)
+    safe_period = re.sub(r"[^A-Za-z0-9._-]+", "_", period)
+    return cache_dir / safe_period / f"{safe_ticker}.csv"
+
+
+def load_cached_ticker(cache_dir: Path, ticker: str, period: str,
+                       max_age_hours: float) -> pd.DataFrame:
+    path = ticker_cache_path(cache_dir, ticker, period)
+    if not path.exists() or max_age_hours <= 0:
+        return pd.DataFrame()
+    age_hours = (time.time() - path.stat().st_mtime) / 3600
+    if age_hours > max_age_hours:
+        return pd.DataFrame()
+    try:
+        cached = pd.read_csv(path, index_col=0, parse_dates=True)
+    except (OSError, ValueError, pd.errors.ParserError):
+        return pd.DataFrame()
+    return cached if "Close" in cached.columns else pd.DataFrame()
+
+
+def save_cached_ticker(cache_dir: Path, ticker: str, period: str,
+                       data: pd.DataFrame) -> None:
+    if data.empty:
+        return
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = ticker_cache_path(cache_dir, ticker, period)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data.to_csv(path)
+
+
+def fetch_tickers(tickers: list[str], period: str, threads: int) -> pd.DataFrame:
+    return yf.download(
+        tickers=tickers,
+        period=period,
+        interval="1d",
+        auto_adjust=True,
+        group_by="column",
+        threads=threads,
+        progress=False,
+        timeout=30,
+    )
+
+
+def retry_failed_ticker(ticker: str, period: str, threads: int, max_retries: int,
+                        retry_base_delay: float) -> tuple[pd.DataFrame, int, str]:
+    last_error = "No usable price history returned"
+    for retry_number in range(1, max_retries + 1):
+        delay = min(retry_base_delay * (2 ** (retry_number - 1)), 60.0)
+        delay += random.uniform(0, min(1.0, delay * 0.25)) if delay > 0 else 0
+        if delay > 0:
+            print(f"  Retrying {ticker} in {delay:.1f}s ({retry_number}/{max_retries})...")
+            time.sleep(delay)
+        try:
+            downloaded = fetch_tickers([ticker], period, threads)
+            one = extract_one_ticker(downloaded, ticker)
+            if not one.empty:
+                return one, retry_number, ""
+        except Exception as exc:  # yfinance raises several transient transport errors.
+            last_error = f"{type(exc).__name__}: {exc}"
+    return pd.DataFrame(), max_retries, last_error
+
+
 def download_and_scan(universe: pd.DataFrame, short_window: int, medium_window: int,
-                      period: str, batch_size: int) -> pd.DataFrame:
+                      period: str, batch_size: int, threads: int = 4,
+                      min_pause: float = 2.0, max_pause: float = 4.0,
+                      max_retries: int = 3, retry_base_delay: float = 2.0,
+                      cache_dir: Path = Path(".cache/market_data"),
+                      cache_max_age_hours: float = 12.0,
+                      refresh_cache: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
     company_by_ticker = universe.set_index("ticker")["company"].to_dict()
     market_by_ticker = universe.set_index("ticker")["market"].to_dict()
     tickers = universe["ticker"].tolist()
     rows = []
+    failures = []
+    ticker_batches = list(chunks(tickers, batch_size))
 
-    for batch in chunks(tickers, batch_size):
-        data = yf.download(
-            tickers=batch,
-            period=period,
-            interval="1d",
-            auto_adjust=True,
-            group_by="column",
-            threads=True,
-            progress=False,
-        )
+    for batch_number, batch in enumerate(ticker_batches, start=1):
+        print(f"Batch {batch_number}/{len(ticker_batches)}: {len(batch)} symbols")
+        ticker_data: dict[str, pd.DataFrame] = {}
+        live_tickers = []
+        for ticker in batch:
+            cached = pd.DataFrame() if refresh_cache else load_cached_ticker(
+                cache_dir, ticker, period, cache_max_age_hours
+            )
+            if cached.empty:
+                live_tickers.append(ticker)
+            else:
+                ticker_data[ticker] = cached
+
+        downloaded = pd.DataFrame()
+        batch_error = ""
+        if live_tickers:
+            try:
+                downloaded = fetch_tickers(live_tickers, period, threads)
+            except Exception as exc:
+                batch_error = f"{type(exc).__name__}: {exc}"
+
+            for ticker in live_tickers:
+                one = extract_one_ticker(downloaded, ticker)
+                if one.empty:
+                    one, retry_count, retry_error = retry_failed_ticker(
+                        ticker=ticker,
+                        period=period,
+                        threads=threads,
+                        max_retries=max_retries,
+                        retry_base_delay=retry_base_delay,
+                    )
+                    if one.empty:
+                        failures.append({
+                            "ticker": ticker,
+                            "company": company_by_ticker[ticker],
+                            "market": market_by_ticker[ticker],
+                            "reason": retry_error or batch_error or "No usable price history returned",
+                            "retry_attempts": retry_count,
+                        })
+                        continue
+                ticker_data[ticker] = one
+                save_cached_ticker(cache_dir, ticker, period, one)
 
         for ticker in batch:
-            one = extract_one_ticker(data, ticker)
+            one = ticker_data.get(ticker, pd.DataFrame())
+            if one.empty:
+                continue
             result = classify_signal(one, short_window, medium_window)
             if result is None:
+                failures.append({
+                    "ticker": ticker,
+                    "company": company_by_ticker[ticker],
+                    "market": market_by_ticker[ticker],
+                    "reason": "Insufficient usable history for moving averages",
+                    "retry_attempts": 0,
+                })
                 continue
             result.update({
                 "ticker": ticker,
@@ -240,15 +356,26 @@ def download_and_scan(universe: pd.DataFrame, short_window: int, medium_window: 
             })
             rows.append(result)
 
-    if not rows:
-        return pd.DataFrame()
+        if live_tickers and batch_number < len(ticker_batches) and max_pause > 0:
+            pause = random.uniform(min_pause, max_pause)
+            print(f"  Pausing {pause:.1f}s before the next batch...")
+            time.sleep(pause)
 
     cols = [
         "date", "market", "ticker", "company", "signal", "close",
         "short_sma", "medium_sma", "cross_gap_pct", "sma_200",
         "above_200_sma", "volume", "volume_20d_avg", "volume_ratio",
     ]
-    return pd.DataFrame(rows)[cols].sort_values(["signal", "market", "ticker"])
+    results = (
+        pd.DataFrame(rows)[cols].sort_values(["signal", "market", "ticker"])
+        if rows else pd.DataFrame(columns=cols)
+    )
+    failure_cols = ["ticker", "company", "market", "reason", "retry_attempts"]
+    failed = (
+        pd.DataFrame(failures)[failure_cols].drop_duplicates(["market", "ticker"], keep="last")
+        if failures else pd.DataFrame(columns=failure_cols)
+    )
+    return results, failed
 
 
 PROMPT_HEADER = """\
@@ -413,7 +540,15 @@ def main() -> None:
     parser.add_argument("--short", type=int, default=20, help="Short SMA window; default 20")
     parser.add_argument("--medium", type=int, default=50, help="Medium SMA window; default 50")
     parser.add_argument("--period", default="2y", help="History requested from yfinance; default 2y")
-    parser.add_argument("--batch-size", type=int, default=75)
+    parser.add_argument("--batch-size", type=int, default=25)
+    parser.add_argument("--threads", type=int, default=4, help="Maximum yfinance workers; default 4")
+    parser.add_argument("--min-pause", type=float, default=2.0, help="Minimum seconds between live batches")
+    parser.add_argument("--max-pause", type=float, default=4.0, help="Maximum seconds between live batches")
+    parser.add_argument("--max-retries", type=int, default=3, help="Retries for failed symbols only")
+    parser.add_argument("--retry-base-delay", type=float, default=2.0, help="Initial exponential-backoff delay")
+    parser.add_argument("--cache-dir", default=".cache/market_data")
+    parser.add_argument("--cache-max-age-hours", type=float, default=12.0)
+    parser.add_argument("--refresh-cache", action="store_true", help="Ignore cached price histories")
     parser.add_argument("--no-sp500", action="store_true")
     parser.add_argument("--no-ftse100", action="store_true")
     parser.add_argument("--custom-csv", help="Optional CSV with ticker,company,market")
@@ -426,6 +561,14 @@ def main() -> None:
         raise ValueError("--short must be smaller than --medium")
     if args.batch_size <= 0:
         raise ValueError("--batch-size must be positive")
+    if args.threads <= 0:
+        raise ValueError("--threads must be positive")
+    if args.min_pause < 0 or args.max_pause < args.min_pause:
+        raise ValueError("pause values must satisfy 0 <= --min-pause <= --max-pause")
+    if args.max_retries < 0 or args.retry_base_delay < 0:
+        raise ValueError("retry values must be non-negative")
+    if args.cache_max_age_hours < 0:
+        raise ValueError("--cache-max-age-hours must be non-negative")
 
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -439,16 +582,27 @@ def main() -> None:
     print(f"Universe: {len(universe)} stocks")
     print(f"Downloading daily candles and testing SMA({args.short}) / SMA({args.medium}) crosses...")
 
-    results = download_and_scan(
+    results, failures = download_and_scan(
         universe=universe,
         short_window=args.short,
         medium_window=args.medium,
         period=args.period,
         batch_size=args.batch_size,
+        threads=args.threads,
+        min_pause=args.min_pause,
+        max_pause=args.max_pause,
+        max_retries=args.max_retries,
+        retry_base_delay=args.retry_base_delay,
+        cache_dir=Path(args.cache_dir),
+        cache_max_age_hours=args.cache_max_age_hours,
+        refresh_cache=args.refresh_cache,
     )
+
+    failures.to_csv(output / "failed_symbols.csv", index=False)
 
     if results.empty:
         print("No usable results.")
+        print(f"Failure audit written to: {(output / 'failed_symbols.csv').resolve()}")
         return
 
     buys = results[results["signal"] == "BUY"].copy()

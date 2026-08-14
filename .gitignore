@@ -2,10 +2,10 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.cache/
 .coverage
 htmlcov/
 .env
 .env.*
 output/
 ai_review.json
-
