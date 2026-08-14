@@ -22,7 +22,7 @@ You can give Codex this instruction:
 > dependencies, run the companies in `data/us_uk_large_mid_mega_cap.csv` using a
 > 12-day short and 24-day medium moving-average crossover, then feed the BUY
 > results through three separate, independent fundamental and recent-news reviews,
-> then use `render_ai_review.py` to calculate their mean evidence-support score.
+> then use `render_ai_review.py` to calculate a three-review consensus mean score.
 > Summarise the consensus classifications and distinguish actionable entries
 > from signals waiting for a pullback or further confirmation.
 
@@ -100,8 +100,9 @@ python render_ai_review.py ai_review_1.json ai_review_2.json ai_review_3.json \
 ```
 
 The renderer requires exactly three files, checks that they contain the same
-tickers, calculates the arithmetic mean and score range, and derives the final
-classification from the rounded mean. `BUY CANDIDATE` requires a mean score of at
+tickers, and returns a three-review consensus mean score together with the score
+range. It derives the final classification from the rounded consensus mean.
+`BUY CANDIDATE` requires a mean score of at
 least 65%, `WATCH / NO TRADE` covers 50% to 64%, and a score below 50% produces
 `REJECT BUY / REVIEW EXIT`. These labels support research decisions and remain
 subject to the technical entry status, independent verification and risk controls.
