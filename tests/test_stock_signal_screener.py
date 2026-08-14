@@ -11,6 +11,7 @@ from stock_signal_screener import (
     normalise_uk_symbol,
     normalise_us_symbol,
     save_cached_ticker,
+    write_three_ai_prompts,
 )
 
 
@@ -130,3 +131,25 @@ def test_retries_only_failed_symbols(tmp_path, monkeypatch) -> None:
     assert calls == [(["GOOD", "BAD"], 2), (["BAD"], 2)]
     assert set(results["ticker"]) == {"GOOD", "BAD"}
     assert failures.empty
+
+
+def test_writes_three_independent_review_prompts(tmp_path) -> None:
+    buys = pd.DataFrame([{
+        "ticker": "AAA.L", "company": "AAA Plc", "market": "UK",
+        "date": "2026-08-14", "close": 100.0, "short_sma": 99.0,
+        "medium_sma": 98.0, "cross_gap_pct": 1.0, "sma_200": 95.0,
+        "above_200_sma": True, "volume_ratio": 1.3, "rsi_14": 55.0,
+        "short_sma_extension_pct": 1.0, "five_day_gain_pct": 2.0,
+        "prior_resistance": 105.0, "resistance_distance_pct": 5.0,
+        "persistent_volume_confirmation": True, "entry_status": "ACTIONABLE_BUY",
+        "entry_warning": "",
+    }])
+
+    write_three_ai_prompts(buys, tmp_path)
+
+    prompts = sorted(tmp_path.glob("buy_signal_review_prompt_*.txt"))
+    assert len(prompts) == 3
+    for number, prompt in enumerate(prompts, start=1):
+        text = prompt.read_text(encoding="utf-8")
+        assert f"INDEPENDENT REVIEW {number} OF 3" in text
+        assert "Do not inspect, copy, reconcile or average" in text

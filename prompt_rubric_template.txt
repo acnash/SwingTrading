@@ -12,6 +12,12 @@ The AI review is NOT a forecast of investment return. Its percentage is an
 EVIDENCE-SUPPORT SCORE indicating how strongly current fundamentals, market context,
 and recent material news support the technical BUY signal.
 
+## Three-review protocol
+Run this rubric in three separate Codex tasks. Each reviewer must work independently
+without seeing, copying or reconciling the other reviewers' answers. Save the three
+JSON arrays separately, then use `render_ai_review.py` to validate the ticker sets
+and calculate the arithmetic mean, score range and consensus classification.
+
 ## Research requirements
 For EACH stock below:
 1. Identify the company and confirm the ticker/exchange.

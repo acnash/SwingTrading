@@ -615,8 +615,16 @@ def render_stock_block(row: pd.Series) -> str:
 """
 
 
-def write_ai_prompt(buys: pd.DataFrame, path: Path) -> None:
+def write_ai_prompt(buys: pd.DataFrame, path: Path, reviewer_number: int | None = None) -> None:
     text = PROMPT_HEADER
+    if reviewer_number is not None:
+        text += f"""
+
+# INDEPENDENT REVIEW {reviewer_number} OF 3
+
+Complete this review independently. Do not inspect, copy, reconcile or average the
+other reviewers' answers. Return your own rubric scores and supporting evidence.
+"""
     text += "\n\n# STOCKS TO REVIEW\n"
     if buys.empty:
         text += "\nNo BUY signals were generated in this run.\n"
@@ -624,6 +632,16 @@ def write_ai_prompt(buys: pd.DataFrame, path: Path) -> None:
         for _, row in buys.iterrows():
             text += render_stock_block(row)
     path.write_text(text, encoding="utf-8")
+
+
+def write_three_ai_prompts(buys: pd.DataFrame, output: Path) -> None:
+    """Write three isolated prompts for the required independent reviews."""
+    for reviewer_number in range(1, 4):
+        write_ai_prompt(
+            buys,
+            output / f"buy_signal_review_prompt_{reviewer_number}.txt",
+            reviewer_number,
+        )
 
 
 def main() -> None:
@@ -730,7 +748,7 @@ def main() -> None:
     pullback_buys.to_csv(output / "wait_for_pullback_signals.csv", index=False)
     confirmation_buys.to_csv(output / "wait_for_confirmation_signals.csv", index=False)
     sells.to_csv(output / "sell_signals.csv", index=False)
-    write_ai_prompt(buys, output / "buy_signal_review_prompt.txt")
+    write_three_ai_prompts(buys, output)
 
     display_cols = ["market", "ticker", "company", "date", "close", "short_sma", "medium_sma", "rsi_14", "volume_ratio", "entry_status"]
     print("\nNEW BUY SIGNALS")
@@ -746,7 +764,7 @@ def main() -> None:
         print(sells[display_cols].to_string(index=False))
 
     print(f"\nWritten to: {output.resolve()}")
-    print("Upload buy_signal_review_prompt.txt to ChatGPT/Codex for the qualitative review.")
+    print("Run the three numbered review prompts in separate Codex tasks, then aggregate their JSON files.")
 
 
 if __name__ == "__main__":

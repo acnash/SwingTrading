@@ -21,8 +21,9 @@ You can give Codex this instruction:
 > Clone `https://github.com/acnash/SwingTrading.git`, install the required
 > dependencies, run the companies in `data/us_uk_large_mid_mega_cap.csv` using a
 > 12-day short and 24-day medium moving-average crossover, then feed the BUY
-> results back into yourself and complete the templated fundamental and recent-news
-> analysis. Summarise the final classifications and distinguish actionable entries
+> results through three separate, independent fundamental and recent-news reviews,
+> then use `render_ai_review.py` to calculate their mean evidence-support score.
+> Summarise the consensus classifications and distinguish actionable entries
 > from signals waiting for a pullback or further confirmation.
 
 Codex should inspect the commands and generated evidence before drawing a
@@ -82,18 +83,28 @@ Outputs are written to `output/`:
 - `wait_for_confirmation_signals.csv`
 - `sell_signals.csv`
 - `failed_symbols.csv`
-- `buy_signal_review_prompt.txt`
+- `buy_signal_review_prompt_1.txt`
+- `buy_signal_review_prompt_2.txt`
+- `buy_signal_review_prompt_3.txt`
 
 `failed_symbols.csv` records unavailable symbols and insufficient histories so a
 partial market-data response cannot pass silently.
 
-Upload `buy_signal_review_prompt.txt` to ChatGPT or Codex and ask it to perform the research exactly as instructed.
-
-Save the returned JSON array as `ai_review.json`, then:
+Run each numbered prompt in a separate Codex task so that every reviewer reaches
+its conclusion independently. Save their JSON arrays as `ai_review_1.json`,
+`ai_review_2.json` and `ai_review_3.json`, then aggregate them with:
 
 ```bash
-python render_ai_review.py ai_review.json
+python render_ai_review.py ai_review_1.json ai_review_2.json ai_review_3.json \
+  --output-csv fundamental_consensus.csv
 ```
+
+The renderer requires exactly three files, checks that they contain the same
+tickers, calculates the arithmetic mean and score range, and derives the final
+classification from the rounded mean. `BUY CANDIDATE` requires a mean score of at
+least 65%, `WATCH / NO TRADE` covers 50% to 64%, and a score below 50% produces
+`REJECT BUY / REVIEW EXIT`. These labels support research decisions and remain
+subject to the technical entry status, independent verification and risk controls.
 
 ## Change the moving-average windows
 
