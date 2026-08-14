@@ -1,5 +1,34 @@
 # SwingTrading
 
+> **This is not financial advice. Use this software entirely at your own risk.**
+> Trading can result in substantial financial loss, and market data, technical
+> signals and AI-generated research can all be incomplete or incorrect. Always
+> test a strategy thoroughly with a paper-trading account before considering its
+> use with a live account and real money.
+
+## Quickest route: run it inside Codex
+
+The quickest way to use this project is to ask Codex to clone the repository,
+install its dependencies, scan the current company universe supplied in
+`data/us_uk_large_mid_mega_cap.csv` with a 12-day short and 24-day medium moving
+average, and then analyse the resulting BUY candidates fundamentally. This lets
+Codex perform the installation, technical screen and structured fundamental
+review as one workflow instead of requiring you to step through every stage
+individually.
+
+You can give Codex this instruction:
+
+> Clone `https://github.com/acnash/SwingTrading.git`, install the required
+> dependencies, run the companies in `data/us_uk_large_mid_mega_cap.csv` using a
+> 12-day short and 24-day medium moving-average crossover, then feed the BUY
+> results back into yourself and complete the templated fundamental and recent-news
+> analysis. Summarise the final classifications and distinguish actionable entries
+> from signals waiting for a pullback or further confirmation.
+
+Codex should inspect the commands and generated evidence before drawing a
+conclusion. The resulting classifications are research outputs rather than trade
+instructions, and every candidate should be independently verified.
+
 SwingTrading is a research-oriented moving-average crossover screener for the
 S&P 500, FTSE 100, and optional custom watchlists. It uses completed daily
 candles from Yahoo Finance and produces deterministic technical signals for
