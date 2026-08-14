@@ -17,6 +17,9 @@ Default windows:
 Outputs:
   output/all_signals.csv
   output/buy_signals.csv
+  output/actionable_buy_signals.csv
+  output/wait_for_pullback_signals.csv
+  output/wait_for_confirmation_signals.csv
   output/sell_signals.csv
   output/failed_symbols.csv
   output/buy_signal_review_prompt.txt
@@ -167,7 +170,20 @@ def extract_one_ticker(downloaded: pd.DataFrame, ticker: str) -> pd.DataFrame:
     return out
 
 
-def classify_signal(df: pd.DataFrame, short_window: int, medium_window: int) -> dict | None:
+def classify_signal(
+    df: pd.DataFrame,
+    short_window: int,
+    medium_window: int,
+    rsi_period: int = 14,
+    max_rsi: float = 68.0,
+    max_short_extension_pct: float = 4.0,
+    max_five_day_gain_pct: float = 8.0,
+    resistance_lookback: int = 60,
+    resistance_proximity_pct: float = 2.0,
+    volume_confirmation_ratio: float = 1.2,
+    volume_confirmation_days: int = 2,
+    volume_confirmation_window: int = 3,
+) -> dict | None:
     if "Close" not in df.columns:
         return None
 
@@ -178,6 +194,15 @@ def classify_signal(df: pd.DataFrame, short_window: int, medium_window: int) -> 
     # Extra context that can later be used by the AI review.
     work["SMA_200"] = work["Close"].rolling(200).mean()
     work["Vol_20"] = work["Volume"].rolling(20).mean() if "Volume" in work.columns else math.nan
+    delta = work["Close"].diff()
+    average_gain = delta.clip(lower=0).ewm(alpha=1 / rsi_period, adjust=False, min_periods=rsi_period).mean()
+    average_loss = -delta.clip(upper=0).ewm(alpha=1 / rsi_period, adjust=False, min_periods=rsi_period).mean()
+    relative_strength = average_gain / average_loss
+    work["RSI"] = 100 - (100 / (1 + relative_strength))
+    work["Five_day_gain_pct"] = work["Close"].pct_change(5) * 100
+    work["Prior_resistance"] = work["Close"].shift(1).rolling(resistance_lookback).max()
+    if "Volume" in work.columns:
+        work["Volume_ratio"] = work["Volume"] / work["Vol_20"]
 
     usable = work.dropna(subset=["SMA_short", "SMA_medium"])
     if len(usable) < 2:
@@ -194,6 +219,49 @@ def classify_signal(df: pd.DataFrame, short_window: int, medium_window: int) -> 
     sma200 = curr.get("SMA_200", math.nan)
     vol20 = curr.get("Vol_20", math.nan)
     volume = curr.get("Volume", math.nan)
+    rsi = curr.get("RSI", math.nan)
+    five_day_gain_pct = curr.get("Five_day_gain_pct", math.nan)
+    prior_resistance = curr.get("Prior_resistance", math.nan)
+    short_extension_pct = (curr["Close"] / curr["SMA_short"] - 1.0) * 100.0
+    resistance_distance_pct = (
+        (prior_resistance - curr["Close"]) / curr["Close"] * 100.0
+        if not pd.isna(prior_resistance) and curr["Close"] != 0 else math.nan
+    )
+
+    recent_volume_ratios = (
+        usable["Volume_ratio"].tail(volume_confirmation_window)
+        if "Volume_ratio" in usable.columns else pd.Series(dtype=float)
+    )
+    confirmed_volume_days = int((recent_volume_ratios >= volume_confirmation_ratio).sum())
+    persistent_volume_confirmation = (
+        confirmed_volume_days >= volume_confirmation_days
+        if len(recent_volume_ratios.dropna()) >= volume_confirmation_days else None
+    )
+
+    overextension_reasons = []
+    if not pd.isna(rsi) and rsi >= max_rsi:
+        overextension_reasons.append(f"RSI {rsi:.1f} >= {max_rsi:.1f}")
+    if short_extension_pct >= max_short_extension_pct:
+        overextension_reasons.append(
+            f"close {short_extension_pct:.1f}% above short SMA >= {max_short_extension_pct:.1f}%"
+        )
+    if not pd.isna(five_day_gain_pct) and five_day_gain_pct >= max_five_day_gain_pct:
+        overextension_reasons.append(
+            f"five-day gain {five_day_gain_pct:.1f}% >= {max_five_day_gain_pct:.1f}%"
+        )
+
+    near_resistance = (
+        not pd.isna(resistance_distance_pct)
+        and abs(resistance_distance_pct) <= resistance_proximity_pct
+    )
+    if buy and overextension_reasons:
+        entry_status = "WAIT_FOR_PULLBACK"
+    elif buy and near_resistance and persistent_volume_confirmation is not True:
+        entry_status = "WAIT_FOR_CONFIRMATION"
+    elif buy:
+        entry_status = "ACTIONABLE_BUY"
+    else:
+        entry_status = "NOT_APPLICABLE"
 
     return {
         "date": usable.index[-1].date().isoformat(),
@@ -207,6 +275,16 @@ def classify_signal(df: pd.DataFrame, short_window: int, medium_window: int) -> 
         "volume_20d_avg": None if pd.isna(vol20) else float(vol20),
         "volume_ratio": None if pd.isna(volume) or pd.isna(vol20) or vol20 == 0 else float(volume / vol20),
         "cross_gap_pct": float((curr["SMA_short"] / curr["SMA_medium"] - 1.0) * 100.0),
+        "rsi_14": None if pd.isna(rsi) else float(rsi),
+        "short_sma_extension_pct": float(short_extension_pct),
+        "five_day_gain_pct": None if pd.isna(five_day_gain_pct) else float(five_day_gain_pct),
+        "prior_resistance": None if pd.isna(prior_resistance) else float(prior_resistance),
+        "resistance_distance_pct": None if pd.isna(resistance_distance_pct) else float(resistance_distance_pct),
+        "near_resistance": bool(near_resistance),
+        "confirmed_volume_days": confirmed_volume_days,
+        "persistent_volume_confirmation": persistent_volume_confirmation,
+        "entry_status": entry_status,
+        "entry_warning": "; ".join(overextension_reasons),
     }
 
 
@@ -284,7 +362,8 @@ def download_and_scan(universe: pd.DataFrame, short_window: int, medium_window: 
                       max_retries: int = 3, retry_base_delay: float = 2.0,
                       cache_dir: Path = Path(".cache/market_data"),
                       cache_max_age_hours: float = 12.0,
-                      refresh_cache: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
+                      refresh_cache: bool = False,
+                      signal_options: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     company_by_ticker = universe.set_index("ticker")["company"].to_dict()
     market_by_ticker = universe.set_index("ticker")["market"].to_dict()
     tickers = universe["ticker"].tolist()
@@ -339,7 +418,7 @@ def download_and_scan(universe: pd.DataFrame, short_window: int, medium_window: 
             one = ticker_data.get(ticker, pd.DataFrame())
             if one.empty:
                 continue
-            result = classify_signal(one, short_window, medium_window)
+            result = classify_signal(one, short_window, medium_window, **(signal_options or {}))
             if result is None:
                 failures.append({
                     "ticker": ticker,
@@ -365,6 +444,10 @@ def download_and_scan(universe: pd.DataFrame, short_window: int, medium_window: 
         "date", "market", "ticker", "company", "signal", "close",
         "short_sma", "medium_sma", "cross_gap_pct", "sma_200",
         "above_200_sma", "volume", "volume_20d_avg", "volume_ratio",
+        "rsi_14", "short_sma_extension_pct", "five_day_gain_pct",
+        "prior_resistance", "resistance_distance_pct", "near_resistance",
+        "confirmed_volume_days", "persistent_volume_confirmation",
+        "entry_status", "entry_warning",
     ]
     results = (
         pd.DataFrame(rows)[cols].sort_values(["signal", "market", "ticker"])
@@ -521,6 +604,14 @@ def render_stock_block(row: pd.Series) -> str:
 - 200-day SMA: {row['sma_200'] if pd.notna(row['sma_200']) else 'UNKNOWN'}
 - Close above 200-day SMA: {row['above_200_sma'] if pd.notna(row['above_200_sma']) else 'UNKNOWN'}
 - Latest volume / 20-day average volume: {row['volume_ratio'] if pd.notna(row['volume_ratio']) else 'UNKNOWN'}
+- RSI(14): {row['rsi_14'] if pd.notna(row['rsi_14']) else 'UNKNOWN'}
+- Close distance above short SMA: {row['short_sma_extension_pct']:.2f}%
+- Five-day price change: {row['five_day_gain_pct'] if pd.notna(row['five_day_gain_pct']) else 'UNKNOWN'}%
+- Prior 60-day resistance: {row['prior_resistance'] if pd.notna(row['prior_resistance']) else 'UNKNOWN'}
+- Distance to prior resistance: {row['resistance_distance_pct'] if pd.notna(row['resistance_distance_pct']) else 'UNKNOWN'}%
+- Persistent volume confirmation: {row['persistent_volume_confirmation']}
+- Entry status: {row['entry_status']}
+- Entry warning: {row['entry_warning'] or 'None'}
 """
 
 
@@ -553,6 +644,14 @@ def main() -> None:
     parser.add_argument("--no-ftse100", action="store_true")
     parser.add_argument("--custom-csv", help="Optional CSV with ticker,company,market")
     parser.add_argument("--output-dir", default="output")
+    parser.add_argument("--max-rsi", type=float, default=68.0)
+    parser.add_argument("--max-short-extension-pct", type=float, default=4.0)
+    parser.add_argument("--max-five-day-gain-pct", type=float, default=8.0)
+    parser.add_argument("--resistance-lookback", type=int, default=60)
+    parser.add_argument("--resistance-proximity-pct", type=float, default=2.0)
+    parser.add_argument("--volume-confirmation-ratio", type=float, default=1.2)
+    parser.add_argument("--volume-confirmation-days", type=int, default=2)
+    parser.add_argument("--volume-confirmation-window", type=int, default=3)
     args = parser.parse_args()
 
     if args.short <= 0 or args.medium <= 0:
@@ -569,6 +668,10 @@ def main() -> None:
         raise ValueError("retry values must be non-negative")
     if args.cache_max_age_hours < 0:
         raise ValueError("--cache-max-age-hours must be non-negative")
+    if args.resistance_lookback <= 0 or args.volume_confirmation_window <= 0:
+        raise ValueError("lookback and confirmation window values must be positive")
+    if not 1 <= args.volume_confirmation_days <= args.volume_confirmation_window:
+        raise ValueError("--volume-confirmation-days must be within the confirmation window")
 
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -596,6 +699,16 @@ def main() -> None:
         cache_dir=Path(args.cache_dir),
         cache_max_age_hours=args.cache_max_age_hours,
         refresh_cache=args.refresh_cache,
+        signal_options={
+            "max_rsi": args.max_rsi,
+            "max_short_extension_pct": args.max_short_extension_pct,
+            "max_five_day_gain_pct": args.max_five_day_gain_pct,
+            "resistance_lookback": args.resistance_lookback,
+            "resistance_proximity_pct": args.resistance_proximity_pct,
+            "volume_confirmation_ratio": args.volume_confirmation_ratio,
+            "volume_confirmation_days": args.volume_confirmation_days,
+            "volume_confirmation_window": args.volume_confirmation_window,
+        },
     )
 
     failures.to_csv(output / "failed_symbols.csv", index=False)
@@ -607,13 +720,19 @@ def main() -> None:
 
     buys = results[results["signal"] == "BUY"].copy()
     sells = results[results["signal"] == "SELL"].copy()
+    actionable_buys = buys[buys["entry_status"] == "ACTIONABLE_BUY"].copy()
+    pullback_buys = buys[buys["entry_status"] == "WAIT_FOR_PULLBACK"].copy()
+    confirmation_buys = buys[buys["entry_status"] == "WAIT_FOR_CONFIRMATION"].copy()
 
     results.to_csv(output / "all_signals.csv", index=False)
     buys.to_csv(output / "buy_signals.csv", index=False)
+    actionable_buys.to_csv(output / "actionable_buy_signals.csv", index=False)
+    pullback_buys.to_csv(output / "wait_for_pullback_signals.csv", index=False)
+    confirmation_buys.to_csv(output / "wait_for_confirmation_signals.csv", index=False)
     sells.to_csv(output / "sell_signals.csv", index=False)
     write_ai_prompt(buys, output / "buy_signal_review_prompt.txt")
 
-    display_cols = ["market", "ticker", "company", "date", "close", "short_sma", "medium_sma", "volume_ratio"]
+    display_cols = ["market", "ticker", "company", "date", "close", "short_sma", "medium_sma", "rsi_14", "volume_ratio", "entry_status"]
     print("\nNEW BUY SIGNALS")
     if buys.empty:
         print("None.")

@@ -42,6 +42,31 @@ def test_detects_sell_crossover() -> None:
     assert result["signal"] == "SELL"
 
 
+def test_late_buy_is_marked_wait_for_pullback() -> None:
+    closes = [100.0] * 55 + [103, 102, 101, 102, 114]
+    result = classify_signal(price_frame(closes), 2, 3, max_rsi=68)
+
+    assert result is not None
+    assert result["signal"] == "BUY"
+    assert result["entry_status"] == "WAIT_FOR_PULLBACK"
+    assert result["rsi_14"] >= 68
+    assert result["entry_warning"]
+
+
+def test_buy_near_resistance_without_persistent_volume_waits_for_confirmation() -> None:
+    closes = [10.0] * 70 + [10.3, 10.2, 10.1, 10.2, 10.4]
+    result = classify_signal(
+        price_frame(closes), 2, 3, max_rsi=100,
+        max_short_extension_pct=100, max_five_day_gain_pct=100,
+    )
+
+    assert result is not None
+    assert result["signal"] == "BUY"
+    assert result["near_resistance"] is True
+    assert result["persistent_volume_confirmation"] is False
+    assert result["entry_status"] == "WAIT_FOR_CONFIRMATION"
+
+
 def test_returns_none_when_history_is_too_short() -> None:
     assert classify_signal(price_frame([1, 2, 3]), 2, 3) is None
 

@@ -13,6 +13,22 @@ Default rule:
 - BUY: 20-day SMA crosses above 50-day SMA.
 - SELL: 20-day SMA crosses below 50-day SMA.
 
+## Example: Premier Foods 12/24 BUY signal
+
+![Premier Foods chart showing the 12-day, 24-day and 200-day moving averages, RSI and volume](docs/images/premier-foods-12-24-buy-signal.png)
+
+This Premier Foods (`PFD.L`) daily chart demonstrates the shorter crossover
+configuration used in the example full-market run. It displays the 12-day SMA,
+24-day SMA and 200-day SMA together with RSI(14) and daily volume. The 12-day
+average crossed above the 24-day average, generating a technical BUY signal,
+while the entry filters found moderate RSI and limited price extension.
+
+The subsequent fundamental review awarded Premier Foods an 80% evidence-support
+score, classified as `STRONGLY SUPPORTS BUY SIGNAL`. That percentage measures how
+strongly the available fundamentals, guidance, recent news and supplied technical
+context support the crossover. It is not a forecast or an expected investment
+return.
+
 ## Install
 
 ```bash
@@ -32,6 +48,9 @@ python stock_signal_screener.py
 Outputs are written to `output/`:
 - `all_signals.csv`
 - `buy_signals.csv`
+- `actionable_buy_signals.csv`
+- `wait_for_pullback_signals.csv`
+- `wait_for_confirmation_signals.csv`
 - `sell_signals.csv`
 - `failed_symbols.csv`
 - `buy_signal_review_prompt.txt`
@@ -83,6 +102,36 @@ python stock_signal_screener.py --batch-size 20 --threads 2 \
 
 Avoid scheduling overlapping runs, because separate processes do not share a
 rate limiter.
+
+## Late-entry protection
+
+Every raw BUY crossover is assigned an entry status. The default safeguards are:
+
+- `WAIT_FOR_PULLBACK` when RSI(14) is at least 68, price is at least 4% above
+  the short SMA, or the five-day gain is at least 8%
+- `WAIT_FOR_CONFIRMATION` when price is within 2% of its prior 60-session high
+  and fewer than two of the last three sessions traded at 1.2 times their
+  respective 20-day average volumes
+- `ACTIONABLE_BUY` when neither condition applies
+
+These filters do not rewrite the original 20/50 crossover. They separate trend
+detection from entry timing. Every threshold has a corresponding command-line
+option, including `--max-rsi`, `--max-short-extension-pct`,
+`--max-five-day-gain-pct`, and the resistance and volume-confirmation options.
+
+### 200-day trend confirmation
+
+The 200-day SMA is currently a confirmation factor rather than a hard rejection
+rule. A valid short/medium crossover can therefore remain a raw BUY signal when
+its closing price is below the 200-day SMA, allowing the screener to identify a
+possible early recovery. In the generated AI-review rubric, a close above the
+200-day SMA earns five technical-support points; a close below it earns zero.
+
+Candidates below the 200-day SMA should normally remain on the watchlist until a
+completed daily candle closes back above that average, preferably with improving
+volume. The screener does not currently assign a dedicated
+`WAIT_FOR_200_SMA_RECLAIM` status, so this additional decision is made during the
+fundamental and technical review stage.
 
 ## Add your own shares
 
