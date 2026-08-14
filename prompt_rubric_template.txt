@@ -1,0 +1,128 @@
+# BUY-SIGNAL FUNDAMENTAL + NEWS REVIEW
+
+You are reviewing stocks that have ALREADY triggered a deterministic technical BUY signal.
+Do not change the technical signal and do not invent missing data.
+
+## Technical rule used by the screener
+BUY = the short daily simple moving average crossed from at-or-below the medium daily
+simple moving average on the previous completed candle to strictly above it on the
+latest completed daily candle.
+
+The AI review is NOT a forecast of investment return. Its percentage is an
+EVIDENCE-SUPPORT SCORE indicating how strongly current fundamentals, market context,
+and recent material news support the technical BUY signal.
+
+## Research requirements
+For EACH stock below:
+1. Identify the company and confirm the ticker/exchange.
+2. Use the latest available reported financial statements and company filings.
+3. Review material company-specific news published in the last 30 calendar days.
+4. Prefer primary sources: company investor-relations releases, regulatory filings,
+   exchange announcements, SEC filings, and official results presentations.
+5. Use high-quality financial/news sources only as secondary confirmation.
+6. State the reporting period/date for every financial figure used.
+7. Do not treat analyst opinion, social-media sentiment, rumours or unsourced claims
+   as company fundamentals.
+8. If a required datum cannot be established reliably, mark it UNKNOWN and exclude
+   that item from the denominator rather than guessing.
+
+## Deterministic scoring rubric
+Score each applicable item exactly as specified.
+
+A. Revenue trajectory — maximum 15
+- Latest comparable revenue growth > +10% YoY: 15
+- > 0% to +10%: 10
+- 0% to -10%: 5
+- < -10%: 0
+
+B. Profitability trajectory — maximum 15
+Use reported operating profit or net income, choosing the measure most consistently
+reported by the company. Compare like-for-like periods.
+- Profitable AND profit growth > +10% YoY: 15
+- Profitable AND growth between 0% and +10%: 10
+- Profitable BUT profit declined: 5
+- Loss-making: 0
+
+C. Free-cash-flow quality — maximum 15
+- Positive FCF and improved YoY: 15
+- Positive FCF but declined YoY: 10
+- Approximately break-even: 5
+- Negative FCF: 0
+
+D. Balance-sheet / financing risk — maximum 15
+For non-financial companies use net-debt/EBITDA where reliably available:
+- < 1.5x: 15
+- 1.5x to < 2.5x: 10
+- 2.5x to < 3.5x: 5
+- >= 3.5x OR explicit near-term financing distress: 0
+For banks/insurers or where this metric is not meaningful, mark UNKNOWN and explain.
+
+E. Guidance / outlook — maximum 15
+- Management explicitly raised current-year guidance: 15
+- Reaffirmed / maintained guidance: 10
+- No formal guidance or genuinely neutral update: 7
+- Lowered guidance: 0
+
+F. Material news, last 30 days — maximum 15
+Classify ONLY company-specific, decision-relevant developments:
+- Net materially positive: 15
+- Mixed / no material development: 8
+- Net materially negative: 0
+
+G. Technical context supplied by screener — maximum 10
+- Close above 200-day SMA: +5
+- Latest daily volume >= 1.20 x trailing 20-day average volume: +5
+If either datum is unavailable, exclude that sub-item from the denominator.
+
+## Final score
+EVIDENCE_SUPPORT_PCT = 100 * points_awarded / points_available
+Round to nearest integer.
+
+Then map:
+- 80–100: STRONGLY SUPPORTS BUY SIGNAL
+- 65–79: SUPPORTS BUY SIGNAL
+- 50–64: NEUTRAL / MIXED
+- 35–49: WEAKENS BUY SIGNAL
+- 0–34: STRONGLY WEAKENS BUY SIGNAL
+
+## Required output
+Return:
+1. A concise markdown table, one row per stock, sorted by EVIDENCE_SUPPORT_PCT descending.
+2. Then a JSON array using the exact schema below.
+
+Table columns:
+Ticker | Company | Market | Signal date | Evidence support % | Classification |
+Revenue | Profitability | FCF | Balance sheet | Guidance | 30d news | Key reason
+
+Exact JSON schema:
+[
+  {
+    "ticker": "string",
+    "company": "string",
+    "market": "US or UK",
+    "signal_date": "YYYY-MM-DD",
+    "evidence_support_pct": 0,
+    "classification": "string",
+    "points_awarded": 0,
+    "points_available": 0,
+    "scores": {
+      "revenue": {"score": 0, "max": 15, "status": "KNOWN|UNKNOWN", "evidence": "string"},
+      "profitability": {"score": 0, "max": 15, "status": "KNOWN|UNKNOWN", "evidence": "string"},
+      "free_cash_flow": {"score": 0, "max": 15, "status": "KNOWN|UNKNOWN", "evidence": "string"},
+      "balance_sheet": {"score": 0, "max": 15, "status": "KNOWN|UNKNOWN", "evidence": "string"},
+      "guidance": {"score": 0, "max": 15, "status": "KNOWN|UNKNOWN", "evidence": "string"},
+      "recent_news": {"score": 0, "max": 15, "status": "KNOWN|UNKNOWN", "evidence": "string"},
+      "above_200_sma": {"score": 0, "max": 5, "status": "KNOWN|UNKNOWN", "evidence": "string"},
+      "volume_confirmation": {"score": 0, "max": 5, "status": "KNOWN|UNKNOWN", "evidence": "string"}
+    },
+    "key_positive": "string",
+    "key_risk": "string",
+    "sources": [
+      {"title": "string", "publisher": "string", "date": "YYYY-MM-DD", "url": "string"}
+    ]
+  }
+]
+
+Do not add points for anything outside the rubric.
+Do not reinterpret missing information optimistically or pessimistically.
+Do not call the score a probability that the share price will rise.
