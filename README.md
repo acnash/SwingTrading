@@ -69,6 +69,28 @@ python stock_signal_screener.py --custom-csv my_stocks.csv
 
 You can use `--no-sp500` and/or `--no-ftse100` to disable the built-in universes.
 
+## Bundled US and UK large/mid-cap universe
+
+The repository includes `data/us_uk_large_mid_mega_cap.csv`, containing S&P 500,
+FTSE 100, and FTSE 250 constituents in the screener's required
+`ticker,company,market` format. These indices provide a liquid large-, mega-,
+and mid-cap universe while excluding penny-stock and micro-cap universes by
+construction.
+
+Run only the bundled list with:
+
+```bash
+python stock_signal_screener.py --no-sp500 --no-ftse100 \
+  --custom-csv data/us_uk_large_mid_mega_cap.csv
+```
+
+The committed file was generated on 14 August 2026. Index membership changes,
+so regenerate it from the current public constituent tables when needed:
+
+```bash
+python tools/update_universe.py
+```
+
 ## Tests
 
 ```bash

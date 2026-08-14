@@ -27,11 +27,26 @@ from __future__ import annotations
 import argparse
 import math
 from datetime import datetime
+from io import StringIO
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+import requests
 import yfinance as yf
+
+
+WIKIPEDIA_USER_AGENT = "SwingTrading/1.0 constituent-table reader"
+
+
+def read_html_tables(url: str) -> list[pd.DataFrame]:
+    response = requests.get(
+        url,
+        headers={"User-Agent": WIKIPEDIA_USER_AGENT},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return pd.read_html(StringIO(response.text))
 
 
 def normalise_us_symbol(symbol: str) -> str:
@@ -49,7 +64,7 @@ def normalise_uk_symbol(symbol: str) -> str:
 
 
 def get_sp500() -> pd.DataFrame:
-    tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+    tables = read_html_tables("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
     df = tables[0][["Symbol", "Security"]].copy()
     df.columns = ["ticker", "company"]
     df["ticker"] = df["ticker"].map(normalise_us_symbol)
@@ -58,7 +73,7 @@ def get_sp500() -> pd.DataFrame:
 
 
 def get_ftse100() -> pd.DataFrame:
-    tables = pd.read_html("https://en.wikipedia.org/wiki/FTSE_100_Index")
+    tables = read_html_tables("https://en.wikipedia.org/wiki/FTSE_100_Index")
     candidate = None
     for table in tables:
         cols = {str(c).lower(): c for c in table.columns}

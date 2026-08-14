@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import pandas as pd
 
 from stock_signal_screener import (
     classify_signal,
+    load_custom_csv,
     normalise_uk_symbol,
     normalise_us_symbol,
 )
@@ -38,3 +41,14 @@ def test_detects_sell_crossover() -> None:
 def test_returns_none_when_history_is_too_short() -> None:
     assert classify_signal(price_frame([1, 2, 3]), 2, 3) is None
 
+
+def test_bundled_universe_is_well_formed() -> None:
+    path = Path(__file__).parents[1] / "data" / "us_uk_large_mid_mega_cap.csv"
+    universe = load_custom_csv(str(path))
+
+    assert len(universe) == 853
+    assert universe["ticker"].notna().all()
+    assert universe["company"].notna().all()
+    assert set(universe["market"]) == {"US", "UK"}
+    assert universe.loc[universe["market"] == "UK", "ticker"].str.endswith(".L").all()
+    assert not universe.duplicated(["market", "ticker"]).any()
