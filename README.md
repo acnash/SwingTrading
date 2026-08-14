@@ -81,6 +81,7 @@ Outputs are written to `output/`:
 - `actionable_buy_signals.csv`
 - `wait_for_pullback_signals.csv`
 - `wait_for_confirmation_signals.csv`
+- `wait_for_volume_confirmation_signals.csv`
 - `sell_signals.csv`
 - `failed_symbols.csv`
 - `buy_signal_review_prompt_1.txt`
@@ -154,6 +155,26 @@ Every raw BUY crossover is assigned an entry status. The default safeguards are:
   and fewer than two of the last three sessions traded at 1.2 times their
   respective 20-day average volumes
 - `ACTIONABLE_BUY` when neither condition applies
+
+## Volume Flow Indicator confirmation
+
+Every signal now includes a deterministic 0-to-100 VFI BUY confirmation index.
+The implementation uses a 130-session VFI, 30-session volatility threshold, 2.5
+times average-volume cap, 0.2 coefficient and five-session EMA signal line. The
+index awards points for positive VFI, position above its signal line, a recent
+bullish signal-line cross, positive five-session direction, improvement over 20
+sessions and proximity to its 20-session high.
+
+- 80-100: `STRONG_ACCUMULATION`
+- 65-79: `SUPPORTS_BUY`
+- 50-64: `MIXED_EARLY_ACCUMULATION`
+- 35-49: `WEAK_VOLUME_SUPPORT`
+- 0-34: `DISTRIBUTION_OR_ABSENT_SUPPORT`
+
+An otherwise actionable crossover with an available VFI index below 50 becomes
+`WAIT_FOR_VOLUME_CONFIRMATION`. VFI remains a confirmation layer alongside the
+12/24 crossover and the three-review fundamental consensus mean; the scores are
+kept separate so technical and fundamental weaknesses remain visible.
 
 These filters do not rewrite the original 20/50 crossover. They separate trend
 detection from entry timing. Every threshold has a corresponding command-line

@@ -20,6 +20,7 @@ Outputs:
   output/actionable_buy_signals.csv
   output/wait_for_pullback_signals.csv
   output/wait_for_confirmation_signals.csv
+  output/wait_for_volume_confirmation_signals.csv
   output/sell_signals.csv
   output/failed_symbols.csv
   output/buy_signal_review_prompt.txt
@@ -170,6 +171,80 @@ def extract_one_ticker(downloaded: pd.DataFrame, ticker: str) -> pd.DataFrame:
     return out
 
 
+def add_vfi_columns(
+    frame: pd.DataFrame,
+    period: int = 130,
+    volatility_period: int = 30,
+    volume_cap: float = 2.5,
+    coefficient: float = 0.2,
+    signal_period: int = 5,
+) -> pd.DataFrame:
+    """Add the conventional Volume Flow Indicator and its EMA signal line."""
+    work = frame.copy()
+    required = {"High", "Low", "Close", "Volume"}
+    if not required.issubset(work.columns):
+        work["VFI"] = math.nan
+        work["VFI_signal"] = math.nan
+        return work
+
+    typical = (work["High"] + work["Low"] + work["Close"]) / 3.0
+    log_change = pd.Series(math.nan, index=work.index, dtype=float)
+    positive = (typical > 0) & (typical.shift(1) > 0)
+    log_change.loc[positive] = (
+        typical.loc[positive].map(math.log)
+        - typical.shift(1).loc[positive].map(math.log)
+    )
+    volatility = log_change.rolling(volatility_period).std()
+    cutoff = coefficient * volatility * work["Close"]
+    price_change = typical.diff()
+    average_volume = work["Volume"].rolling(period).mean().shift(1)
+    capped_volume = pd.concat(
+        [work["Volume"], average_volume * volume_cap], axis=1
+    ).min(axis=1)
+    signed_volume = pd.Series(0.0, index=work.index)
+    signed_volume = signed_volume.mask(price_change > cutoff, capped_volume)
+    signed_volume = signed_volume.mask(price_change < -cutoff, -capped_volume)
+    work["VFI"] = signed_volume.rolling(period).sum() / average_volume
+    work["VFI_signal"] = work["VFI"].ewm(
+        span=signal_period, adjust=False, min_periods=signal_period
+    ).mean()
+    return work
+
+
+def vfi_confirmation_score(work: pd.DataFrame) -> tuple[int | None, str]:
+    """Return a deterministic 0-100 VFI confirmation score and classification."""
+    usable = work.dropna(subset=["VFI", "VFI_signal"])
+    if len(usable) < 21:
+        return None, "UNAVAILABLE"
+
+    vfi = usable["VFI"]
+    signal = usable["VFI_signal"]
+    score = 0
+    score += 25 if vfi.iloc[-1] > 0 else 0
+    score += 20 if vfi.iloc[-1] > signal.iloc[-1] else 0
+    recent_cross = (
+        (vfi.shift(1) <= signal.shift(1)) & (vfi > signal)
+    ).tail(3).any()
+    score += 20 if recent_cross else 0
+    score += 15 if vfi.iloc[-1] > vfi.iloc[-6] else 0
+    score += 10 if vfi.iloc[-1] > vfi.iloc[-21] else 0
+    twenty_day_high = vfi.tail(20).max()
+    near_high = vfi.iloc[-1] >= twenty_day_high - 0.1 * abs(twenty_day_high)
+    score += 10 if near_high else 0
+
+    if score >= 80:
+        classification = "STRONG_ACCUMULATION"
+    elif score >= 65:
+        classification = "SUPPORTS_BUY"
+    elif score >= 50:
+        classification = "MIXED_EARLY_ACCUMULATION"
+    elif score >= 35:
+        classification = "WEAK_VOLUME_SUPPORT"
+    else:
+        classification = "DISTRIBUTION_OR_ABSENT_SUPPORT"
+    return score, classification
+
+
 def classify_signal(
     df: pd.DataFrame,
     short_window: int,
@@ -183,6 +258,12 @@ def classify_signal(
     volume_confirmation_ratio: float = 1.2,
     volume_confirmation_days: int = 2,
     volume_confirmation_window: int = 3,
+    vfi_period: int = 130,
+    vfi_volatility_period: int = 30,
+    vfi_volume_cap: float = 2.5,
+    vfi_coefficient: float = 0.2,
+    vfi_signal_period: int = 5,
+    min_vfi_buy_score: int = 50,
 ) -> dict | None:
     if "Close" not in df.columns:
         return None
@@ -203,6 +284,11 @@ def classify_signal(
     work["Prior_resistance"] = work["Close"].shift(1).rolling(resistance_lookback).max()
     if "Volume" in work.columns:
         work["Volume_ratio"] = work["Volume"] / work["Vol_20"]
+    work = add_vfi_columns(
+        work, period=vfi_period, volatility_period=vfi_volatility_period,
+        volume_cap=vfi_volume_cap, coefficient=vfi_coefficient,
+        signal_period=vfi_signal_period,
+    )
 
     usable = work.dropna(subset=["SMA_short", "SMA_medium"])
     if len(usable) < 2:
@@ -222,6 +308,9 @@ def classify_signal(
     rsi = curr.get("RSI", math.nan)
     five_day_gain_pct = curr.get("Five_day_gain_pct", math.nan)
     prior_resistance = curr.get("Prior_resistance", math.nan)
+    vfi = curr.get("VFI", math.nan)
+    vfi_signal = curr.get("VFI_signal", math.nan)
+    vfi_score, vfi_classification = vfi_confirmation_score(usable)
     short_extension_pct = (curr["Close"] / curr["SMA_short"] - 1.0) * 100.0
     resistance_distance_pct = (
         (prior_resistance - curr["Close"]) / curr["Close"] * 100.0
@@ -258,6 +347,8 @@ def classify_signal(
         entry_status = "WAIT_FOR_PULLBACK"
     elif buy and near_resistance and persistent_volume_confirmation is not True:
         entry_status = "WAIT_FOR_CONFIRMATION"
+    elif buy and vfi_score is not None and vfi_score < min_vfi_buy_score:
+        entry_status = "WAIT_FOR_VOLUME_CONFIRMATION"
     elif buy:
         entry_status = "ACTIONABLE_BUY"
     else:
@@ -283,6 +374,10 @@ def classify_signal(
         "near_resistance": bool(near_resistance),
         "confirmed_volume_days": confirmed_volume_days,
         "persistent_volume_confirmation": persistent_volume_confirmation,
+        "vfi": None if pd.isna(vfi) else float(vfi),
+        "vfi_signal": None if pd.isna(vfi_signal) else float(vfi_signal),
+        "vfi_buy_index": vfi_score,
+        "vfi_classification": vfi_classification,
         "entry_status": entry_status,
         "entry_warning": "; ".join(overextension_reasons),
     }
@@ -446,7 +541,8 @@ def download_and_scan(universe: pd.DataFrame, short_window: int, medium_window: 
         "above_200_sma", "volume", "volume_20d_avg", "volume_ratio",
         "rsi_14", "short_sma_extension_pct", "five_day_gain_pct",
         "prior_resistance", "resistance_distance_pct", "near_resistance",
-        "confirmed_volume_days", "persistent_volume_confirmation",
+        "confirmed_volume_days", "persistent_volume_confirmation", "vfi",
+        "vfi_signal", "vfi_buy_index", "vfi_classification",
         "entry_status", "entry_warning",
     ]
     results = (
@@ -594,6 +690,10 @@ Do not call the score a probability that the share price will rise.
 
 
 def render_stock_block(row: pd.Series) -> str:
+    vfi = row.get("vfi", math.nan)
+    vfi_signal = row.get("vfi_signal", math.nan)
+    vfi_buy_index = row.get("vfi_buy_index", math.nan)
+    vfi_classification = row.get("vfi_classification", "UNAVAILABLE")
     return f"""
 ### {row['ticker']} — {row['company']} ({row['market']})
 - Signal date: {row['date']}
@@ -610,6 +710,10 @@ def render_stock_block(row: pd.Series) -> str:
 - Prior 60-day resistance: {row['prior_resistance'] if pd.notna(row['prior_resistance']) else 'UNKNOWN'}
 - Distance to prior resistance: {row['resistance_distance_pct'] if pd.notna(row['resistance_distance_pct']) else 'UNKNOWN'}%
 - Persistent volume confirmation: {row['persistent_volume_confirmation']}
+- VFI: {vfi if pd.notna(vfi) else 'UNKNOWN'}
+- VFI signal line: {vfi_signal if pd.notna(vfi_signal) else 'UNKNOWN'}
+- VFI BUY confirmation index: {vfi_buy_index if pd.notna(vfi_buy_index) else 'UNKNOWN'}
+- VFI classification: {vfi_classification}
 - Entry status: {row['entry_status']}
 - Entry warning: {row['entry_warning'] or 'None'}
 """
@@ -670,6 +774,12 @@ def main() -> None:
     parser.add_argument("--volume-confirmation-ratio", type=float, default=1.2)
     parser.add_argument("--volume-confirmation-days", type=int, default=2)
     parser.add_argument("--volume-confirmation-window", type=int, default=3)
+    parser.add_argument("--vfi-period", type=int, default=130)
+    parser.add_argument("--vfi-volatility-period", type=int, default=30)
+    parser.add_argument("--vfi-volume-cap", type=float, default=2.5)
+    parser.add_argument("--vfi-coefficient", type=float, default=0.2)
+    parser.add_argument("--vfi-signal-period", type=int, default=5)
+    parser.add_argument("--min-vfi-buy-score", type=int, default=50)
     args = parser.parse_args()
 
     if args.short <= 0 or args.medium <= 0:
@@ -690,6 +800,12 @@ def main() -> None:
         raise ValueError("lookback and confirmation window values must be positive")
     if not 1 <= args.volume_confirmation_days <= args.volume_confirmation_window:
         raise ValueError("--volume-confirmation-days must be within the confirmation window")
+    if min(args.vfi_period, args.vfi_volatility_period, args.vfi_signal_period) <= 0:
+        raise ValueError("VFI periods must be positive")
+    if args.vfi_volume_cap <= 0 or args.vfi_coefficient <= 0:
+        raise ValueError("VFI volume cap and coefficient must be positive")
+    if not 0 <= args.min_vfi_buy_score <= 100:
+        raise ValueError("--min-vfi-buy-score must be between 0 and 100")
 
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -726,6 +842,12 @@ def main() -> None:
             "volume_confirmation_ratio": args.volume_confirmation_ratio,
             "volume_confirmation_days": args.volume_confirmation_days,
             "volume_confirmation_window": args.volume_confirmation_window,
+            "vfi_period": args.vfi_period,
+            "vfi_volatility_period": args.vfi_volatility_period,
+            "vfi_volume_cap": args.vfi_volume_cap,
+            "vfi_coefficient": args.vfi_coefficient,
+            "vfi_signal_period": args.vfi_signal_period,
+            "min_vfi_buy_score": args.min_vfi_buy_score,
         },
     )
 
@@ -741,16 +863,18 @@ def main() -> None:
     actionable_buys = buys[buys["entry_status"] == "ACTIONABLE_BUY"].copy()
     pullback_buys = buys[buys["entry_status"] == "WAIT_FOR_PULLBACK"].copy()
     confirmation_buys = buys[buys["entry_status"] == "WAIT_FOR_CONFIRMATION"].copy()
+    volume_wait_buys = buys[buys["entry_status"] == "WAIT_FOR_VOLUME_CONFIRMATION"].copy()
 
     results.to_csv(output / "all_signals.csv", index=False)
     buys.to_csv(output / "buy_signals.csv", index=False)
     actionable_buys.to_csv(output / "actionable_buy_signals.csv", index=False)
     pullback_buys.to_csv(output / "wait_for_pullback_signals.csv", index=False)
     confirmation_buys.to_csv(output / "wait_for_confirmation_signals.csv", index=False)
+    volume_wait_buys.to_csv(output / "wait_for_volume_confirmation_signals.csv", index=False)
     sells.to_csv(output / "sell_signals.csv", index=False)
     write_three_ai_prompts(buys, output)
 
-    display_cols = ["market", "ticker", "company", "date", "close", "short_sma", "medium_sma", "rsi_14", "volume_ratio", "entry_status"]
+    display_cols = ["market", "ticker", "company", "date", "close", "short_sma", "medium_sma", "rsi_14", "volume_ratio", "vfi_buy_index", "vfi_classification", "entry_status"]
     print("\nNEW BUY SIGNALS")
     if buys.empty:
         print("None.")
