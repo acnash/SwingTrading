@@ -150,7 +150,8 @@ rate limiter.
 Every raw BUY crossover is assigned an entry status. The default safeguards are:
 
 - `WAIT_FOR_PULLBACK` when RSI(14) is at least 68, price is at least 4% above
-  the short SMA, or the five-day gain is at least 8%
+  the short SMA, the five-day gain is at least 8%, or the latest close is within
+  1% of the 52-week high
 - `WAIT_FOR_CONFIRMATION` when price is within 2% of its prior 60-session high
   and fewer than two of the last three sessions traded at 1.2 times their
   respective 20-day average volumes
@@ -179,7 +180,22 @@ kept separate so technical and fundamental weaknesses remain visible.
 These filters do not rewrite the original 20/50 crossover. They separate trend
 detection from entry timing. Every threshold has a corresponding command-line
 option, including `--max-rsi`, `--max-short-extension-pct`,
-`--max-five-day-gain-pct`, and the resistance and volume-confirmation options.
+`--max-five-day-gain-pct`, `--max-52-week-high-distance-pct`, and the resistance
+and volume-confirmation options.
+
+### 52-week peak protection
+
+The screener calculates the high and low from the adjusted daily highs and lows
+of the latest 252 completed sessions. It also reports the closing price's
+percentage distance below the 52-week high and its position within that range.
+By default, a raw BUY whose latest close is no more than 1% below the 52-week
+high is retained for audit purposes but assigned `WAIT_FOR_PULLBACK`, regardless
+of volume confirmation. This prevents a crossover at the top of its annual
+range from becoming an actionable entry.
+
+The lookback and threshold can be changed with `--high-low-lookback` and
+`--max-52-week-high-distance-pct`. If 252 completed sessions are unavailable,
+the 52-week measures are recorded as unknown and do not delay the signal.
 
 ### 200-day trend confirmation
 

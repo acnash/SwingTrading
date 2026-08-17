@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+import pytest
 import stock_signal_screener as screener
 
 from stock_signal_screener import (
@@ -84,6 +85,9 @@ def test_weak_vfi_moves_buy_to_volume_confirmation(monkeypatch) -> None:
 
     assert result is not None
     assert result["signal"] == "BUY"
+    assert result["fifty_two_week_high"] is None
+    assert result["fifty_two_week_low"] is None
+    assert result["at_52_week_peak"] is False
     assert result["vfi_buy_index"] == 35
     assert result["entry_status"] == "WAIT_FOR_VOLUME_CONFIRMATION"
 
@@ -97,6 +101,41 @@ def test_late_buy_is_marked_wait_for_pullback() -> None:
     assert result["entry_status"] == "WAIT_FOR_PULLBACK"
     assert result["rsi_14"] >= 68
     assert result["entry_warning"]
+
+
+def test_buy_within_one_percent_of_52_week_high_waits_for_pullback() -> None:
+    closes = [1.0] * 252 + [3, 2, 1, 2, 4]
+    frame = ohlcv_frame(closes, [1_000] * len(closes))
+    result = classify_signal(
+        frame, 2, 3, max_rsi=1000,
+        max_short_extension_pct=1000, max_five_day_gain_pct=1000,
+        resistance_proximity_pct=0, min_vfi_buy_score=0,
+    )
+
+    assert result is not None
+    assert result["signal"] == "BUY"
+    assert result["fifty_two_week_high"] == pytest.approx(4.04)
+    assert result["fifty_two_week_low"] == pytest.approx(0.99)
+    assert result["distance_from_52_week_high_pct"] == pytest.approx(0.990099)
+    assert result["at_52_week_peak"] is True
+    assert result["entry_status"] == "WAIT_FOR_PULLBACK"
+    assert "52-week high" in result["entry_warning"]
+
+
+def test_buy_more_than_one_percent_below_52_week_high_remains_actionable() -> None:
+    closes = [95.0] * 10 + [101.0] + [95.0] * 241 + [98, 97, 96, 97, 99]
+    frame = ohlcv_frame(closes, [1_000] * len(closes))
+    result = classify_signal(
+        frame, 2, 3, max_rsi=1000,
+        max_short_extension_pct=1000, max_five_day_gain_pct=1000,
+        resistance_proximity_pct=0, min_vfi_buy_score=0,
+    )
+
+    assert result is not None
+    assert result["signal"] == "BUY"
+    assert result["distance_from_52_week_high_pct"] > 1.0
+    assert result["at_52_week_peak"] is False
+    assert result["entry_status"] == "ACTIONABLE_BUY"
 
 
 def test_buy_near_resistance_without_persistent_volume_waits_for_confirmation() -> None:
@@ -186,6 +225,9 @@ def test_writes_three_independent_review_prompts(tmp_path) -> None:
         "above_200_sma": True, "volume_ratio": 1.3, "rsi_14": 55.0,
         "short_sma_extension_pct": 1.0, "five_day_gain_pct": 2.0,
         "prior_resistance": 105.0, "resistance_distance_pct": 5.0,
+        "fifty_two_week_high": 110.0, "fifty_two_week_low": 70.0,
+        "distance_from_52_week_high_pct": 9.1,
+        "position_in_52_week_range_pct": 75.0, "at_52_week_peak": False,
         "persistent_volume_confirmation": True, "entry_status": "ACTIONABLE_BUY",
         "entry_warning": "",
     }])

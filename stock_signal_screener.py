@@ -255,6 +255,8 @@ def classify_signal(
     max_five_day_gain_pct: float = 8.0,
     resistance_lookback: int = 60,
     resistance_proximity_pct: float = 2.0,
+    high_low_lookback: int = 252,
+    max_52_week_high_distance_pct: float = 1.0,
     volume_confirmation_ratio: float = 1.2,
     volume_confirmation_days: int = 2,
     volume_confirmation_window: int = 3,
@@ -282,6 +284,10 @@ def classify_signal(
     work["RSI"] = 100 - (100 / (1 + relative_strength))
     work["Five_day_gain_pct"] = work["Close"].pct_change(5) * 100
     work["Prior_resistance"] = work["Close"].shift(1).rolling(resistance_lookback).max()
+    high_prices = work["High"] if "High" in work.columns else work["Close"]
+    low_prices = work["Low"] if "Low" in work.columns else work["Close"]
+    work["High_52w"] = high_prices.rolling(high_low_lookback).max()
+    work["Low_52w"] = low_prices.rolling(high_low_lookback).min()
     if "Volume" in work.columns:
         work["Volume_ratio"] = work["Volume"] / work["Vol_20"]
     work = add_vfi_columns(
@@ -308,6 +314,8 @@ def classify_signal(
     rsi = curr.get("RSI", math.nan)
     five_day_gain_pct = curr.get("Five_day_gain_pct", math.nan)
     prior_resistance = curr.get("Prior_resistance", math.nan)
+    high_52w = curr.get("High_52w", math.nan)
+    low_52w = curr.get("Low_52w", math.nan)
     vfi = curr.get("VFI", math.nan)
     vfi_signal = curr.get("VFI_signal", math.nan)
     vfi_score, vfi_classification = vfi_confirmation_score(usable)
@@ -315,6 +323,23 @@ def classify_signal(
     resistance_distance_pct = (
         (prior_resistance - curr["Close"]) / curr["Close"] * 100.0
         if not pd.isna(prior_resistance) and curr["Close"] != 0 else math.nan
+    )
+    distance_from_52_week_high_pct = (
+        (high_52w - curr["Close"]) / high_52w * 100.0
+        if not pd.isna(high_52w) and high_52w != 0 else math.nan
+    )
+    position_in_52_week_range_pct = (
+        (curr["Close"] - low_52w) / (high_52w - low_52w) * 100.0
+        if (
+            not pd.isna(high_52w)
+            and not pd.isna(low_52w)
+            and high_52w != low_52w
+        )
+        else math.nan
+    )
+    at_52_week_peak = (
+        not pd.isna(distance_from_52_week_high_pct)
+        and distance_from_52_week_high_pct <= max_52_week_high_distance_pct
     )
 
     recent_volume_ratios = (
@@ -337,6 +362,12 @@ def classify_signal(
     if not pd.isna(five_day_gain_pct) and five_day_gain_pct >= max_five_day_gain_pct:
         overextension_reasons.append(
             f"five-day gain {five_day_gain_pct:.1f}% >= {max_five_day_gain_pct:.1f}%"
+        )
+    if at_52_week_peak:
+        overextension_reasons.append(
+            "close "
+            f"{distance_from_52_week_high_pct:.1f}% below 52-week high "
+            f"<= {max_52_week_high_distance_pct:.1f}%"
         )
 
     near_resistance = (
@@ -372,6 +403,19 @@ def classify_signal(
         "prior_resistance": None if pd.isna(prior_resistance) else float(prior_resistance),
         "resistance_distance_pct": None if pd.isna(resistance_distance_pct) else float(resistance_distance_pct),
         "near_resistance": bool(near_resistance),
+        "fifty_two_week_high": None if pd.isna(high_52w) else float(high_52w),
+        "fifty_two_week_low": None if pd.isna(low_52w) else float(low_52w),
+        "distance_from_52_week_high_pct": (
+            None
+            if pd.isna(distance_from_52_week_high_pct)
+            else float(distance_from_52_week_high_pct)
+        ),
+        "position_in_52_week_range_pct": (
+            None
+            if pd.isna(position_in_52_week_range_pct)
+            else float(position_in_52_week_range_pct)
+        ),
+        "at_52_week_peak": bool(at_52_week_peak),
         "confirmed_volume_days": confirmed_volume_days,
         "persistent_volume_confirmation": persistent_volume_confirmation,
         "vfi": None if pd.isna(vfi) else float(vfi),
@@ -541,6 +585,9 @@ def download_and_scan(universe: pd.DataFrame, short_window: int, medium_window: 
         "above_200_sma", "volume", "volume_20d_avg", "volume_ratio",
         "rsi_14", "short_sma_extension_pct", "five_day_gain_pct",
         "prior_resistance", "resistance_distance_pct", "near_resistance",
+        "fifty_two_week_high", "fifty_two_week_low",
+        "distance_from_52_week_high_pct", "position_in_52_week_range_pct",
+        "at_52_week_peak",
         "confirmed_volume_days", "persistent_volume_confirmation", "vfi",
         "vfi_signal", "vfi_buy_index", "vfi_classification",
         "entry_status", "entry_warning",
@@ -709,6 +756,11 @@ def render_stock_block(row: pd.Series) -> str:
 - Five-day price change: {row['five_day_gain_pct'] if pd.notna(row['five_day_gain_pct']) else 'UNKNOWN'}%
 - Prior 60-day resistance: {row['prior_resistance'] if pd.notna(row['prior_resistance']) else 'UNKNOWN'}
 - Distance to prior resistance: {row['resistance_distance_pct'] if pd.notna(row['resistance_distance_pct']) else 'UNKNOWN'}%
+- 52-week high: {row['fifty_two_week_high'] if pd.notna(row['fifty_two_week_high']) else 'UNKNOWN'}
+- 52-week low: {row['fifty_two_week_low'] if pd.notna(row['fifty_two_week_low']) else 'UNKNOWN'}
+- Distance below 52-week high: {row['distance_from_52_week_high_pct'] if pd.notna(row['distance_from_52_week_high_pct']) else 'UNKNOWN'}%
+- Position in 52-week range: {row['position_in_52_week_range_pct'] if pd.notna(row['position_in_52_week_range_pct']) else 'UNKNOWN'}%
+- At 52-week peak: {row['at_52_week_peak']}
 - Persistent volume confirmation: {row['persistent_volume_confirmation']}
 - VFI: {vfi if pd.notna(vfi) else 'UNKNOWN'}
 - VFI signal line: {vfi_signal if pd.notna(vfi_signal) else 'UNKNOWN'}
@@ -771,6 +823,8 @@ def main() -> None:
     parser.add_argument("--max-five-day-gain-pct", type=float, default=8.0)
     parser.add_argument("--resistance-lookback", type=int, default=60)
     parser.add_argument("--resistance-proximity-pct", type=float, default=2.0)
+    parser.add_argument("--high-low-lookback", type=int, default=252)
+    parser.add_argument("--max-52-week-high-distance-pct", type=float, default=1.0)
     parser.add_argument("--volume-confirmation-ratio", type=float, default=1.2)
     parser.add_argument("--volume-confirmation-days", type=int, default=2)
     parser.add_argument("--volume-confirmation-window", type=int, default=3)
@@ -796,8 +850,10 @@ def main() -> None:
         raise ValueError("retry values must be non-negative")
     if args.cache_max_age_hours < 0:
         raise ValueError("--cache-max-age-hours must be non-negative")
-    if args.resistance_lookback <= 0 or args.volume_confirmation_window <= 0:
+    if min(args.resistance_lookback, args.high_low_lookback, args.volume_confirmation_window) <= 0:
         raise ValueError("lookback and confirmation window values must be positive")
+    if args.max_52_week_high_distance_pct < 0:
+        raise ValueError("--max-52-week-high-distance-pct must be non-negative")
     if not 1 <= args.volume_confirmation_days <= args.volume_confirmation_window:
         raise ValueError("--volume-confirmation-days must be within the confirmation window")
     if min(args.vfi_period, args.vfi_volatility_period, args.vfi_signal_period) <= 0:
@@ -839,6 +895,8 @@ def main() -> None:
             "max_five_day_gain_pct": args.max_five_day_gain_pct,
             "resistance_lookback": args.resistance_lookback,
             "resistance_proximity_pct": args.resistance_proximity_pct,
+            "high_low_lookback": args.high_low_lookback,
+            "max_52_week_high_distance_pct": args.max_52_week_high_distance_pct,
             "volume_confirmation_ratio": args.volume_confirmation_ratio,
             "volume_confirmation_days": args.volume_confirmation_days,
             "volume_confirmation_window": args.volume_confirmation_window,
