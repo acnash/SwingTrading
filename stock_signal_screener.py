@@ -5,6 +5,7 @@ Daily moving-average crossover screener for US + UK equities.
 Default universes:
   - S&P 500
   - FTSE 100
+  - Nasdaq-listed mid-, large-, and mega-cap companies
 
 Signal definition (daily candles):
   BUY  = short SMA was <= medium SMA yesterday and is > medium SMA today.
@@ -19,6 +20,7 @@ Outputs:
   output/buy_signals.csv
   output/actionable_buy_signals.csv
   output/wait_for_pullback_signals.csv
+  output/wait_for_200_sma_reclaim_signals.csv
   output/wait_for_confirmation_signals.csv
   output/wait_for_volume_confirmation_signals.csv
   output/sell_signals.csv
@@ -46,6 +48,14 @@ import yfinance as yf
 
 
 WIKIPEDIA_USER_AGENT = "SwingTrading/1.0 constituent-table reader"
+NASDAQ_SCREENER_URL = "https://api.nasdaq.com/api/screener/stocks"
+NASDAQ_MIN_MARKET_CAP_USD = 2_000_000_000
+NASDAQ_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; SwingTrading/1.0)",
+    "Accept": "application/json, text/plain, */*",
+    "Origin": "https://www.nasdaq.com",
+    "Referer": "https://www.nasdaq.com/",
+}
 
 
 def read_html_tables(url: str) -> list[pd.DataFrame]:
@@ -116,6 +126,109 @@ def get_ftse100() -> pd.DataFrame:
     return df
 
 
+def parse_market_cap(value: object) -> float:
+    """Parse Nasdaq screener market-cap values into US dollars."""
+    if value is None or pd.isna(value):
+        return math.nan
+    cleaned = re.sub(r"[^0-9.\-]", "", str(value))
+    if not cleaned or cleaned in {"-", ".", "-."}:
+        return math.nan
+    try:
+        return float(cleaned)
+    except ValueError:
+        return math.nan
+
+
+def is_nasdaq_primary_equity(name: object, industry: object = "") -> bool:
+    """Exclude funds and secondary securities from Nasdaq screener rows."""
+    security_name = str(name).strip().lower()
+    industry_name = str(industry).strip().lower()
+    if not security_name:
+        return False
+    if industry_name == "blank checks":
+        return False
+
+    excluded_phrases = (
+        "warrant",
+        "contingent value right",
+        "subscription right",
+        "preferred stock",
+        "preferred share",
+        "preference share",
+        "senior note",
+        "subordinated note",
+        " note due ",
+        " notes due ",
+        "debenture",
+        "exchange traded fund",
+        "exchange-traded fund",
+        " etf",
+        " etn",
+        "depositary shares each representing",
+        "depositary shares representing a 1/",
+        "depositary shares representing 1/",
+    )
+    if any(phrase in security_name for phrase in excluded_phrases):
+        return False
+    if " unit" in security_name and "common unit" not in security_name:
+        return False
+    return True
+
+
+def get_nasdaq_mid_large_mega(
+    min_market_cap_usd: float = NASDAQ_MIN_MARKET_CAP_USD,
+) -> pd.DataFrame:
+    """Return Nasdaq-listed primary equities worth at least $2 billion."""
+    response = requests.get(
+        NASDAQ_SCREENER_URL,
+        headers=NASDAQ_HEADERS,
+        params={
+            "tableonly": "true",
+            "limit": 10_000,
+            "offset": 0,
+            "exchange": "nasdaq",
+            "download": "true",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data") or {}
+    rows = data.get("rows")
+    if rows is None:
+        rows = (data.get("table") or {}).get("rows")
+    if not rows:
+        raise RuntimeError("Nasdaq screener returned no stock rows.")
+
+    raw = pd.DataFrame(rows)
+    required = {"symbol", "name", "marketCap"}
+    missing = required - set(raw.columns)
+    if missing:
+        raise RuntimeError(
+            f"Nasdaq screener response is missing fields: {sorted(missing)}"
+        )
+
+    market_caps = raw["marketCap"].map(parse_market_cap)
+    industries = raw.get("industry", pd.Series("", index=raw.index))
+    primary_equities = [
+        is_nasdaq_primary_equity(name, industry)
+        for name, industry in zip(raw["name"], industries)
+    ]
+    selected = raw.loc[
+        (market_caps >= min_market_cap_usd) & pd.Series(primary_equities, index=raw.index)
+    ].copy()
+    if selected.empty:
+        raise RuntimeError("Nasdaq screener returned no qualifying primary equities.")
+
+    selected = selected[["symbol", "name"]].rename(
+        columns={"symbol": "ticker", "name": "company"}
+    )
+    selected["ticker"] = selected["ticker"].map(normalise_us_symbol)
+    selected["company"] = selected["company"].astype(str).str.strip()
+    selected["market"] = "US"
+    return selected.drop_duplicates("ticker").sort_values("ticker", ignore_index=True)
+
+
 def load_custom_csv(path: str | None) -> pd.DataFrame:
     if not path:
         return pd.DataFrame(columns=["ticker", "company", "market"])
@@ -127,12 +240,19 @@ def load_custom_csv(path: str | None) -> pd.DataFrame:
     return df[["ticker", "company", "market"]].copy()
 
 
-def build_universe(include_sp500: bool, include_ftse100: bool, custom_csv: str | None) -> pd.DataFrame:
+def build_universe(
+    include_sp500: bool,
+    include_ftse100: bool,
+    custom_csv: str | None,
+    include_nasdaq: bool = True,
+) -> pd.DataFrame:
     parts = []
     if include_sp500:
         parts.append(get_sp500())
     if include_ftse100:
         parts.append(get_ftse100())
+    if include_nasdaq:
+        parts.append(get_nasdaq_mid_large_mega())
     custom = load_custom_csv(custom_csv)
     if not custom.empty:
         parts.append(custom)
@@ -374,8 +494,28 @@ def classify_signal(
         not pd.isna(resistance_distance_pct)
         and abs(resistance_distance_pct) <= resistance_proximity_pct
     )
+    above_200_sma = None if pd.isna(sma200) else bool(curr["Close"] > sma200)
+    entry_warnings = list(overextension_reasons)
+    if buy and above_200_sma is not True:
+        if pd.isna(sma200):
+            entry_warnings.append(
+                "200-day SMA unavailable; confirmed close above it is required"
+            )
+        else:
+            distance_below_sma200_pct = (
+                (sma200 - curr["Close"]) / sma200 * 100.0
+                if sma200 != 0 else math.nan
+            )
+            entry_warnings.append(
+                "close "
+                f"{distance_below_sma200_pct:.1f}% below 200-day SMA; "
+                "confirmed close above it is required"
+            )
+
     if buy and overextension_reasons:
         entry_status = "WAIT_FOR_PULLBACK"
+    elif buy and above_200_sma is not True:
+        entry_status = "WAIT_FOR_200_SMA_RECLAIM"
     elif buy and near_resistance and persistent_volume_confirmation is not True:
         entry_status = "WAIT_FOR_CONFIRMATION"
     elif buy and vfi_score is not None and vfi_score < min_vfi_buy_score:
@@ -392,7 +532,7 @@ def classify_signal(
         "short_sma": float(curr["SMA_short"]),
         "medium_sma": float(curr["SMA_medium"]),
         "sma_200": None if pd.isna(sma200) else float(sma200),
-        "above_200_sma": None if pd.isna(sma200) else bool(curr["Close"] > sma200),
+        "above_200_sma": above_200_sma,
         "volume": None if pd.isna(volume) else float(volume),
         "volume_20d_avg": None if pd.isna(vol20) else float(vol20),
         "volume_ratio": None if pd.isna(volume) or pd.isna(vol20) or vol20 == 0 else float(volume / vol20),
@@ -423,7 +563,7 @@ def classify_signal(
         "vfi_buy_index": vfi_score,
         "vfi_classification": vfi_classification,
         "entry_status": entry_status,
-        "entry_warning": "; ".join(overextension_reasons),
+        "entry_warning": "; ".join(entry_warnings),
     }
 
 
@@ -816,6 +956,11 @@ def main() -> None:
     parser.add_argument("--refresh-cache", action="store_true", help="Ignore cached price histories")
     parser.add_argument("--no-sp500", action="store_true")
     parser.add_argument("--no-ftse100", action="store_true")
+    parser.add_argument(
+        "--no-nasdaq",
+        action="store_true",
+        help="Exclude Nasdaq-listed companies with market cap of at least $2 billion",
+    )
     parser.add_argument("--custom-csv", help="Optional CSV with ticker,company,market")
     parser.add_argument("--output-dir", default="output")
     parser.add_argument("--max-rsi", type=float, default=68.0)
@@ -870,6 +1015,7 @@ def main() -> None:
         include_sp500=not args.no_sp500,
         include_ftse100=not args.no_ftse100,
         custom_csv=args.custom_csv,
+        include_nasdaq=not args.no_nasdaq,
     )
 
     print(f"Universe: {len(universe)} stocks")
@@ -920,6 +1066,9 @@ def main() -> None:
     sells = results[results["signal"] == "SELL"].copy()
     actionable_buys = buys[buys["entry_status"] == "ACTIONABLE_BUY"].copy()
     pullback_buys = buys[buys["entry_status"] == "WAIT_FOR_PULLBACK"].copy()
+    sma200_wait_buys = buys[
+        buys["entry_status"] == "WAIT_FOR_200_SMA_RECLAIM"
+    ].copy()
     confirmation_buys = buys[buys["entry_status"] == "WAIT_FOR_CONFIRMATION"].copy()
     volume_wait_buys = buys[buys["entry_status"] == "WAIT_FOR_VOLUME_CONFIRMATION"].copy()
 
@@ -927,6 +1076,9 @@ def main() -> None:
     buys.to_csv(output / "buy_signals.csv", index=False)
     actionable_buys.to_csv(output / "actionable_buy_signals.csv", index=False)
     pullback_buys.to_csv(output / "wait_for_pullback_signals.csv", index=False)
+    sma200_wait_buys.to_csv(
+        output / "wait_for_200_sma_reclaim_signals.csv", index=False
+    )
     confirmation_buys.to_csv(output / "wait_for_confirmation_signals.csv", index=False)
     volume_wait_buys.to_csv(output / "wait_for_volume_confirmation_signals.csv", index=False)
     sells.to_csv(output / "sell_signals.csv", index=False)

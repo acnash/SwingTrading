@@ -6,12 +6,16 @@ import stock_signal_screener as screener
 
 from stock_signal_screener import (
     add_vfi_columns,
+    build_universe,
     classify_signal,
     download_and_scan,
+    get_nasdaq_mid_large_mega,
+    is_nasdaq_primary_equity,
     load_custom_csv,
     load_cached_ticker,
     normalise_uk_symbol,
     normalise_us_symbol,
+    parse_market_cap,
     save_cached_ticker,
     vfi_confirmation_score,
     write_three_ai_prompts,
@@ -58,6 +62,100 @@ def test_normalises_yahoo_symbols() -> None:
     assert normalise_uk_symbol("AZN.L") == "AZN.L"
 
 
+def test_parses_nasdaq_market_caps() -> None:
+    assert parse_market_cap("2,500,000,000.00") == 2_500_000_000
+    assert parse_market_cap("$10,000") == 10_000
+    assert pd.isna(parse_market_cap("N/A"))
+
+
+@pytest.mark.parametrize(
+    ("name", "industry", "expected"),
+    [
+        ("Example Inc. Common Stock", "Software", True),
+        ("Example plc American Depositary Shares", "Software", True),
+        ("Pipeline L.P. Common Units representing Limited Partner Interests", "Oil & Gas", True),
+        ("Example Inc. Series A Preferred Stock", "Finance", False),
+        ("Example Inc. Warrants", "Software", False),
+        ("Example Inc. Senior Notes due 2030", "Finance", False),
+        ("Example Inc. 8.00% Notes due 2028", "Finance", False),
+        ("Acquisition Corp. Class A Common Stock", "Blank Checks", False),
+    ],
+)
+def test_identifies_nasdaq_primary_equities(
+    name: str, industry: str, expected: bool,
+) -> None:
+    assert is_nasdaq_primary_equity(name, industry) is expected
+
+
+def test_get_nasdaq_mid_large_mega_filters_rows(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "data": {
+                    "rows": [
+                        {
+                            "symbol": "MID",
+                            "name": "Mid Company Common Stock",
+                            "marketCap": "2,000,000,000",
+                            "industry": "Software",
+                        },
+                        {
+                            "symbol": "SMALL",
+                            "name": "Small Company Common Stock",
+                            "marketCap": "1,999,999,999",
+                            "industry": "Software",
+                        },
+                        {
+                            "symbol": "MIDP",
+                            "name": "Mid Company Preferred Stock",
+                            "marketCap": "4,000,000,000",
+                            "industry": "Software",
+                        },
+                    ]
+                }
+            }
+
+    monkeypatch.setattr(screener.requests, "get", lambda *args, **kwargs: FakeResponse())
+    universe = get_nasdaq_mid_large_mega()
+
+    assert universe.to_dict("records") == [
+        {"ticker": "MID", "company": "Mid Company Common Stock", "market": "US"}
+    ]
+
+
+def test_build_universe_includes_nasdaq_and_deduplicates(monkeypatch) -> None:
+    monkeypatch.setattr(
+        screener,
+        "get_sp500",
+        lambda: pd.DataFrame([
+            {"ticker": "SHARED", "company": "Shared Inc.", "market": "US"},
+        ]),
+    )
+    monkeypatch.setattr(
+        screener,
+        "get_ftse100",
+        lambda: pd.DataFrame([
+            {"ticker": "UKCO.L", "company": "UK Co", "market": "UK"},
+        ]),
+    )
+    monkeypatch.setattr(
+        screener,
+        "get_nasdaq_mid_large_mega",
+        lambda: pd.DataFrame([
+            {"ticker": "SHARED", "company": "Shared Inc. Common Stock", "market": "US"},
+            {"ticker": "NASDAQ", "company": "Nasdaq Mid Cap", "market": "US"},
+        ]),
+    )
+
+    universe = build_universe(True, True, None, include_nasdaq=True)
+
+    assert set(universe["ticker"]) == {"NASDAQ", "SHARED", "UKCO.L"}
+    assert not universe.duplicated("ticker").any()
+
+
 def test_detects_buy_crossover() -> None:
     result = classify_signal(price_frame([3, 2, 1, 2, 4]), 2, 3)
 
@@ -78,7 +176,7 @@ def test_weak_vfi_moves_buy_to_volume_confirmation(monkeypatch) -> None:
         lambda work: (35, "WEAK_VOLUME_SUPPORT"),
     )
     result = classify_signal(
-        price_frame([3, 2, 1, 2, 4]), 2, 3,
+        price_frame([1.0] * 200 + [3, 2, 1, 2, 4]), 2, 3,
         max_rsi=1000, max_short_extension_pct=1000,
         max_five_day_gain_pct=1000, resistance_proximity_pct=0,
     )
@@ -90,6 +188,35 @@ def test_weak_vfi_moves_buy_to_volume_confirmation(monkeypatch) -> None:
     assert result["at_52_week_peak"] is False
     assert result["vfi_buy_index"] == 35
     assert result["entry_status"] == "WAIT_FOR_VOLUME_CONFIRMATION"
+
+
+def test_buy_below_200_day_sma_waits_for_reclaim() -> None:
+    closes = [100.0] * 252 + [3, 2, 1, 2, 4]
+    result = classify_signal(
+        price_frame(closes), 2, 3, max_rsi=1000,
+        max_short_extension_pct=1000, max_five_day_gain_pct=1000,
+        resistance_proximity_pct=0, min_vfi_buy_score=0,
+    )
+
+    assert result is not None
+    assert result["signal"] == "BUY"
+    assert result["above_200_sma"] is False
+    assert result["entry_status"] == "WAIT_FOR_200_SMA_RECLAIM"
+    assert "below 200-day SMA" in result["entry_warning"]
+
+
+def test_buy_without_200_day_sma_waits_for_confirmation() -> None:
+    result = classify_signal(
+        price_frame([3, 2, 1, 2, 4]), 2, 3, max_rsi=1000,
+        max_short_extension_pct=1000, max_five_day_gain_pct=1000,
+        resistance_proximity_pct=0, min_vfi_buy_score=0,
+    )
+
+    assert result is not None
+    assert result["signal"] == "BUY"
+    assert result["above_200_sma"] is None
+    assert result["entry_status"] == "WAIT_FOR_200_SMA_RECLAIM"
+    assert "200-day SMA unavailable" in result["entry_warning"]
 
 
 def test_late_buy_is_marked_wait_for_pullback() -> None:
@@ -122,7 +249,7 @@ def test_buy_within_one_percent_of_52_week_high_waits_for_pullback() -> None:
     assert "52-week high" in result["entry_warning"]
 
 
-def test_buy_more_than_one_percent_below_52_week_high_remains_actionable() -> None:
+def test_buy_above_200_day_and_more_than_one_percent_below_high_is_actionable() -> None:
     closes = [95.0] * 10 + [101.0] + [95.0] * 241 + [98, 97, 96, 97, 99]
     frame = ohlcv_frame(closes, [1_000] * len(closes))
     result = classify_signal(
@@ -135,11 +262,12 @@ def test_buy_more_than_one_percent_below_52_week_high_remains_actionable() -> No
     assert result["signal"] == "BUY"
     assert result["distance_from_52_week_high_pct"] > 1.0
     assert result["at_52_week_peak"] is False
+    assert result["above_200_sma"] is True
     assert result["entry_status"] == "ACTIONABLE_BUY"
 
 
 def test_buy_near_resistance_without_persistent_volume_waits_for_confirmation() -> None:
-    closes = [10.0] * 70 + [10.3, 10.2, 10.1, 10.2, 10.4]
+    closes = [10.0] * 200 + [10.3, 10.2, 10.1, 10.2, 10.4]
     result = classify_signal(
         price_frame(closes), 2, 3, max_rsi=100,
         max_short_extension_pct=100, max_five_day_gain_pct=100,
@@ -160,7 +288,7 @@ def test_bundled_universe_is_well_formed() -> None:
     path = Path(__file__).parents[1] / "data" / "us_uk_large_mid_mega_cap.csv"
     universe = load_custom_csv(str(path))
 
-    assert len(universe) == 853
+    assert len(universe) >= 1_000
     assert universe["ticker"].notna().all()
     assert universe["company"].notna().all()
     assert set(universe["market"]) == {"US", "UK"}

@@ -31,7 +31,8 @@ conclusion. The resulting classifications are research outputs rather than trade
 instructions, and every candidate should be independently verified.
 
 SwingTrading is a research-oriented moving-average crossover screener for the
-S&P 500, FTSE 100, and optional custom watchlists. It uses completed daily
+S&P 500, FTSE 100, Nasdaq-listed companies worth at least $2 billion, and
+optional custom watchlists. It uses completed daily
 candles from Yahoo Finance and produces deterministic technical signals for
 subsequent fundamental and news review.
 
@@ -80,6 +81,7 @@ Outputs are written to `output/`:
 - `buy_signals.csv`
 - `actionable_buy_signals.csv`
 - `wait_for_pullback_signals.csv`
+- `wait_for_200_sma_reclaim_signals.csv`
 - `wait_for_confirmation_signals.csv`
 - `wait_for_volume_confirmation_signals.csv`
 - `sell_signals.csv`
@@ -152,10 +154,13 @@ Every raw BUY crossover is assigned an entry status. The default safeguards are:
 - `WAIT_FOR_PULLBACK` when RSI(14) is at least 68, price is at least 4% above
   the short SMA, the five-day gain is at least 8%, or the latest close is within
   1% of the 52-week high
+- `WAIT_FOR_200_SMA_RECLAIM` when a completed close above a known 200-day SMA
+  has not been confirmed
 - `WAIT_FOR_CONFIRMATION` when price is within 2% of its prior 60-session high
   and fewer than two of the last three sessions traded at 1.2 times their
   respective 20-day average volumes
-- `ACTIONABLE_BUY` when neither condition applies
+- `ACTIONABLE_BUY` when all entry safeguards pass, including a completed close
+  above the 200-day SMA
 
 ## Volume Flow Indicator confirmation
 
@@ -199,17 +204,18 @@ the 52-week measures are recorded as unknown and do not delay the signal.
 
 ### 200-day trend confirmation
 
-The 200-day SMA is currently a confirmation factor rather than a hard rejection
-rule. A valid short/medium crossover can therefore remain a raw BUY signal when
-its closing price is below the 200-day SMA, allowing the screener to identify a
-possible early recovery. In the generated AI-review rubric, a close above the
-200-day SMA earns five technical-support points; a close below it earns zero.
+A raw short/medium BUY crossover requires a completed close above a known
+200-day SMA before it can become `ACTIONABLE_BUY`. A close at or below that
+average, or insufficient history to calculate it, produces
+`WAIT_FOR_200_SMA_RECLAIM`. Other earlier safeguards can retain their more
+specific waiting status, while the 200-day warning remains recorded in the
+signal output.
 
-Candidates below the 200-day SMA should normally remain on the watchlist until a
-completed daily candle closes back above that average, preferably with improving
-volume. The screener does not currently assign a dedicated
-`WAIT_FOR_200_SMA_RECLAIM` status, so this additional decision is made during the
-fundamental and technical review stage.
+The generated AI-review rubric continues to award five technical-support points
+for a close above the 200-day SMA and zero points for a close below it. Candidates
+in `WAIT_FOR_200_SMA_RECLAIM` remain on the watchlist until a completed daily
+candle closes above the freshly calculated average, preferably with improving
+volume.
 
 ## Add your own shares
 
@@ -227,25 +233,35 @@ Then:
 python stock_signal_screener.py --custom-csv my_stocks.csv
 ```
 
-You can use `--no-sp500` and/or `--no-ftse100` to disable the built-in universes.
+You can use `--no-sp500`, `--no-ftse100`, and/or `--no-nasdaq` to disable the
+built-in universes.
 
-## Bundled US and UK large/mid-cap universe
+## Bundled US and UK mid-, large-, and mega-cap universe
 
 The repository includes `data/us_uk_large_mid_mega_cap.csv`, containing S&P 500,
-FTSE 100, and FTSE 250 constituents in the screener's required
+FTSE 100, FTSE 250, and qualifying Nasdaq-listed companies in the screener's required
 `ticker,company,market` format. These indices provide a liquid large-, mega-,
 and mid-cap universe while excluding penny-stock and micro-cap universes by
-construction.
+construction. Nasdaq rows use a minimum current market capitalisation of $2 billion,
+which covers the conventional mid-cap ($2 billion to $10 billion), large-cap
+($10 billion and above), and mega-cap ($200 billion and above) bands. Preferred
+shares, warrants, rights, debt securities, non-common units, blank-check companies,
+ETFs, and ETNs are excluded.
+
+Nasdaq companies enter the same completed-candle technical scan as every other
+company. Any resulting BUY crossover is included automatically in the generated
+three independent fundamental and recent-news review prompts.
 
 Run only the bundled list with:
 
 ```bash
-python stock_signal_screener.py --no-sp500 --no-ftse100 \
+python stock_signal_screener.py --no-sp500 --no-ftse100 --no-nasdaq \
   --custom-csv data/us_uk_large_mid_mega_cap.csv
 ```
 
-The committed file was generated on 14 August 2026. Index membership changes,
-so regenerate it from the current public constituent tables when needed:
+The committed file was generated on 27 August 2026. Index membership and market
+capitalisations change, so regenerate it from the current public constituent tables
+and official Nasdaq screener when needed:
 
 ```bash
 python tools/update_universe.py

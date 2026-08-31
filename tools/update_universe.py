@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the bundled US and UK large/mid-cap custom universe."""
+"""Regenerate the bundled US and UK mid-, large-, and mega-cap universe."""
 
 from pathlib import Path
 import sys
@@ -10,7 +10,12 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from stock_signal_screener import normalise_uk_symbol, normalise_us_symbol, read_html_tables
+from stock_signal_screener import (
+    get_nasdaq_mid_large_mega,
+    normalise_uk_symbol,
+    normalise_us_symbol,
+    read_html_tables,
+)
 
 
 SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -35,6 +40,8 @@ def build_universe() -> pd.DataFrame:
     sp500_table["ticker"] = sp500_table["ticker"].map(normalise_us_symbol)
     sp500_table["market"] = "US"
 
+    nasdaq = get_nasdaq_mid_large_mega()
+
     ftse100 = find_company_ticker_table(read_html_tables(FTSE100_URL))
     ftse250 = find_company_ticker_table(read_html_tables(FTSE250_URL))
     london = pd.concat([ftse100, ftse250], ignore_index=True).dropna(subset=["ticker", "company"])
@@ -42,7 +49,7 @@ def build_universe() -> pd.DataFrame:
     london["ticker"] = london["ticker"].map(normalise_uk_symbol)
     london["market"] = "UK"
 
-    universe = pd.concat([sp500_table, london], ignore_index=True)
+    universe = pd.concat([sp500_table, nasdaq, london], ignore_index=True)
     universe = universe.drop_duplicates(subset=["market", "ticker"])
     return universe[["ticker", "company", "market"]].sort_values(
         ["market", "company", "ticker"], ignore_index=True
